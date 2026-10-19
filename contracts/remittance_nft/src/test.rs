@@ -434,6 +434,33 @@ fn test_small_repayment_does_not_write_score_change() {
 }
 
 #[test]
+fn test_update_score_at_min_repayment_floor_awards_one_point() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let admin = Address::generate(&env);
+    let user = Address::generate(&env);
+
+    let contract_id = env.register(RemittanceNFT, ());
+    let client = RemittanceNFTClient::new(&env, &contract_id);
+
+    client.initialize(&admin);
+    client.mint(
+        &user,
+        &500,
+        &create_test_hash(&env, 1),
+        &create_test_uri(&env),
+        &create_test_commitment(&env, 1),
+        &None,
+    );
+
+    // Exactly at the floor (100 tokens) is accepted and awards exactly 1 point.
+    client.update_score(&user, &RemittanceNFT::MIN_SCORE_UPDATE_REPAYMENT, &None);
+
+    assert_eq!(client.get_score(&user), 501);
+}
+
+#[test]
 #[should_panic]
 fn test_update_score_rejects_non_positive_repayment() {
     let env = Env::default();
@@ -3073,4 +3100,395 @@ fn test_lifecycle_methods_resume_after_unpause() {
 
     client.burn(&second_user, &None);
     assert!(client.get_metadata(&second_user).is_none());
+}
+
+// ── #1146: admin parameter setter events ─────────────────────────────────────
+
+/// `set_default_burn_threshold` must publish an event that carries both the
+/// previous and the new threshold, using the same `(event, admin)` topic shape
+/// and `(old, new)` payload shape as the other admin config-change events.
+#[test]
+fn test_set_default_burn_threshold_emits_old_and_new_value() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let admin = Address::generate(&env);
+    let contract_id = env.register(RemittanceNFT, ());
+    let client = RemittanceNFTClient::new(&env, &contract_id);
+
+    client.initialize(&admin);
+
+    // initialize() seeds DEFAULT_BURN_THRESHOLD, so the first change is a real
+    // default -> new transition.
+    let initial = client.get_default_burn_threshold();
+
+    // The test host only retains the most recent invocation's events, so the
+    // event has to be captured before any other contract call is made.
+    client.set_default_burn_threshold(&5);
+    let first_events = env.events().all();
+    assert_eq!(first_events.len(), 1);
+    let first_event = first_events.get(0).unwrap();
+    let first_topic = Symbol::from_val(&env, &first_event.1.get(0).unwrap());
+    let first_topic_1 = Address::from_val(&env, &first_event.1.get(1).unwrap());
+    let first_data = <(u32, u32)>::from_val(&env, &first_event.2);
+    assert_eq!(
+        first_topic,
+        Symbol::new(&env, "DefaultBurnThresholdUpdated")
+    );
+    assert_eq!(first_topic_1, admin);
+    assert_eq!(first_data, (initial, 5u32));
+
+    // State is persisted only after the event is published, and reading it back
+    // replaces the event buffer, so it is asserted after the capture above.
+    assert_eq!(client.get_default_burn_threshold(), 5);
+
+    // A second change proves the `old` value is read from storage before the
+    // overwrite rather than being a hard-coded default.
+    client.set_default_burn_threshold(&9);
+
+    let events = env.events().all();
+    assert_eq!(events.len(), 1);
+    let event = events.get(0).unwrap();
+    let topic_0 = Symbol::from_val(&env, &event.1.get(0).unwrap());
+    let topic_1 = Address::from_val(&env, &event.1.get(1).unwrap());
+    let data = <(u32, u32)>::from_val(&env, &event.2);
+
+    assert_eq!(topic_0, Symbol::new(&env, "DefaultBurnThresholdUpdated"));
+    assert_eq!(topic_1, admin);
+    assert_eq!(data, (5u32, 9u32));
+    assert_eq!(client.get_default_burn_threshold(), 9);
+}
+
+/// `set_min_repayment_amount` must publish an event that carries both the
+/// previous and the new amount, using the same convention as above.
+#[test]
+fn test_set_min_repayment_amount_emits_old_and_new_value() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let admin = Address::generate(&env);
+    let contract_id = env.register(RemittanceNFT, ());
+    let client = RemittanceNFTClient::new(&env, &contract_id);
+
+    client.initialize(&admin);
+
+    let initial = client.get_min_repayment_amount();
+
+    // The test host only retains the most recent invocation's events, so the
+    // event has to be captured before any other contract call is made.
+    client.set_min_repayment_amount(&1_000_000);
+    let first_events = env.events().all();
+    assert_eq!(first_events.len(), 1);
+    let first_event = first_events.get(0).unwrap();
+    let first_topic = Symbol::from_val(&env, &first_event.1.get(0).unwrap());
+    let first_topic_1 = Address::from_val(&env, &first_event.1.get(1).unwrap());
+    let first_data = <(i128, i128)>::from_val(&env, &first_event.2);
+    assert_eq!(first_topic, Symbol::new(&env, "MinRepaymentUpdated"));
+    assert_eq!(first_topic_1, admin);
+    assert_eq!(first_data, (initial, 1_000_000i128));
+
+    // State is persisted only after the event is published, and reading it back
+    // replaces the event buffer, so it is asserted after the capture above.
+    assert_eq!(client.get_min_repayment_amount(), 1_000_000);
+
+    client.set_min_repayment_amount(&2_500_000);
+
+    let events = env.events().all();
+    assert_eq!(events.len(), 1);
+    let event = events.get(0).unwrap();
+    let topic_0 = Symbol::from_val(&env, &event.1.get(0).unwrap());
+    let topic_1 = Address::from_val(&env, &event.1.get(1).unwrap());
+    let data = <(i128, i128)>::from_val(&env, &event.2);
+
+    assert_eq!(topic_0, Symbol::new(&env, "MinRepaymentUpdated"));
+    assert_eq!(topic_1, admin);
+    assert_eq!(data, (1_000_000i128, 2_500_000i128));
+    assert_eq!(client.get_min_repayment_amount(), 2_500_000);
+}
+
+/// The event is emitted only after validation succeeds, so a rejected change
+/// must leave no parameter-update event behind.
+#[test]
+fn test_set_default_burn_threshold_rejected_value_emits_no_event() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let admin = Address::generate(&env);
+    let contract_id = env.register(RemittanceNFT, ());
+    let client = RemittanceNFTClient::new(&env, &contract_id);
+
+    client.initialize(&admin);
+
+    // Both rejected calls are the most recent invocation, so an empty event
+    // buffer proves validation ran before any emission.
+    assert_eq!(
+        client.try_set_default_burn_threshold(&0),
+        Err(Ok(NftError::InvalidThreshold))
+    );
+    assert_eq!(env.events().all().len(), 0);
+
+    assert_eq!(
+        client.try_set_default_burn_threshold(&(RemittanceNFT::MAX_ALLOWED_BURN_THRESHOLD + 1)),
+        Err(Ok(NftError::InvalidThreshold))
+    );
+    assert_eq!(env.events().all().len(), 0);
+
+    // A rejected change must also leave the stored value untouched.
+    assert_eq!(
+        client.get_default_burn_threshold(),
+        RemittanceNFT::DEFAULT_BURN_THRESHOLD
+    );
+}
+
+/// The setter is still admin-only: adding the event emission did not weaken the
+/// authorization check.
+#[test]
+#[should_panic]
+fn test_set_min_repayment_amount_requires_admin_auth() {
+    let env = Env::default();
+    let admin = Address::generate(&env);
+
+    let contract_id = env.register(RemittanceNFT, ());
+    let client = RemittanceNFTClient::new(&env, &contract_id);
+
+    env.mock_all_auths();
+    client.initialize(&admin);
+
+    env.mock_auths(&[]);
+    client.set_min_repayment_amount(&1_000_000);
+}
+
+// ---------------------------------------------------------------------------
+// Issue #1145: validate_metadata_uri must enforce the documented ipfs:// /
+// https:// prefix instead of only checking a length floor. "aaaaaaaa" is the
+// example from the issue: exactly 8 bytes, so it satisfied the old
+// `uri.len() < 8` check and used to mint successfully.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_mint_rejects_metadata_uri_without_accepted_prefix() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let admin = Address::generate(&env);
+    let user = Address::generate(&env);
+
+    let contract_id = env.register(RemittanceNFT, ());
+    let client = RemittanceNFTClient::new(&env, &contract_id);
+
+    client.initialize(&admin);
+
+    let result = client.try_mint(
+        &user,
+        &500,
+        &create_test_hash(&env, 1),
+        &String::from_str(&env, "aaaaaaaa"),
+        &create_test_commitment(&env, 1),
+        &None,
+    );
+    assert_eq!(result, Err(Ok(NftError::InvalidMetadataUri)));
+
+    // The rejected mint wrote nothing for the user.
+    assert!(client.get_metadata(&user).is_none());
+    assert_eq!(client.get_score(&user), 0);
+}
+
+#[test]
+fn test_mint_accepts_ipfs_and_https_metadata_uris() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let admin = Address::generate(&env);
+    let contract_id = env.register(RemittanceNFT, ());
+    let client = RemittanceNFTClient::new(&env, &contract_id);
+
+    client.initialize(&admin);
+
+    let ipfs_uri = String::from_str(&env, "ipfs://QmTest123");
+    let ipfs_user = Address::generate(&env);
+    client.mint(
+        &ipfs_user,
+        &500,
+        &create_test_hash(&env, 2),
+        &ipfs_uri,
+        &create_test_commitment(&env, 2),
+        &None,
+    );
+    assert_eq!(client.get_metadata_uri(&ipfs_user), Some(ipfs_uri));
+
+    let https_uri = String::from_str(&env, "https://example.com/metadata/1.json");
+    let https_user = Address::generate(&env);
+    client.mint(
+        &https_user,
+        &500,
+        &create_test_hash(&env, 3),
+        &https_uri,
+        &create_test_commitment(&env, 3),
+        &None,
+    );
+    assert_eq!(client.get_metadata_uri(&https_user), Some(https_uri));
+}
+
+#[test]
+fn test_mint_rejects_metadata_uri_prefix_lookalikes() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let admin = Address::generate(&env);
+    let contract_id = env.register(RemittanceNFT, ());
+    let client = RemittanceNFTClient::new(&env, &contract_id);
+
+    client.initialize(&admin);
+
+    // Every one of these is 8+ bytes, so all of them were accepted before the
+    // prefix check existed.
+    let rejected = [
+        "IPFS://QmTest123",    // scheme comparison is case-sensitive
+        "HTTPS://example.com", // uppercase scheme
+        "ipfs:/QmTest123",     // one slash short
+        "ipfs/QmTest123",      // no scheme separator
+        "https:/example.com",  // one slash short
+        "http://example.com",  // wrong scheme
+        "ftp://example.com",   // wrong scheme
+        " ipfs://QmTest123",   // leading whitespace before the scheme
+        "metadata.json",       // no scheme at all
+    ];
+
+    for candidate in rejected {
+        let user = Address::generate(&env);
+        let result = client.try_mint(
+            &user,
+            &500,
+            &create_test_hash(&env, 4),
+            &String::from_str(&env, candidate),
+            &create_test_commitment(&env, 4),
+            &None,
+        );
+        assert_eq!(
+            result,
+            Err(Ok(NftError::InvalidMetadataUri)),
+            "expected {candidate} to be rejected"
+        );
+    }
+}
+
+#[test]
+fn test_mint_enforces_metadata_uri_minimum_length() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let admin = Address::generate(&env);
+    let contract_id = env.register(RemittanceNFT, ());
+    let client = RemittanceNFTClient::new(&env, &contract_id);
+
+    client.initialize(&admin);
+
+    // A bare "ipfs://" is 7 bytes: the only URI the kept length floor rejects
+    // that the prefix check on its own would accept, so pin the behaviour.
+    let bare_ipfs_user = Address::generate(&env);
+    let result = client.try_mint(
+        &bare_ipfs_user,
+        &500,
+        &create_test_hash(&env, 5),
+        &String::from_str(&env, "ipfs://"),
+        &create_test_commitment(&env, 5),
+        &None,
+    );
+    assert_eq!(result, Err(Ok(NftError::InvalidMetadataUri)));
+
+    // "https://" is the longest accepted prefix (8 bytes) and therefore the
+    // shortest URI that clears both checks.
+    let bare_https_user = Address::generate(&env);
+    let result = client.try_mint(
+        &bare_https_user,
+        &500,
+        &create_test_hash(&env, 6),
+        &String::from_str(&env, "https://"),
+        &create_test_commitment(&env, 6),
+        &None,
+    );
+    assert!(result.is_ok());
+}
+
+#[test]
+fn test_admin_remint_enforces_metadata_uri_prefix() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let admin = Address::generate(&env);
+    let user = Address::generate(&env);
+
+    let contract_id = env.register(RemittanceNFT, ());
+    let client = RemittanceNFTClient::new(&env, &contract_id);
+
+    client.initialize(&admin);
+
+    // Only a burned account with an outstanding approval can be reminted.
+    client.mint(
+        &user,
+        &500,
+        &create_test_hash(&env, 7),
+        &create_test_uri(&env),
+        &create_test_commitment(&env, 7),
+        &None,
+    );
+    client.burn(&user, &None);
+    client.approve_remint(&user);
+
+    let result = client.try_admin_remint(
+        &user,
+        &500,
+        &create_test_hash(&env, 8),
+        &String::from_str(&env, "aaaaaaaa"),
+        &create_test_commitment(&env, 8),
+    );
+    assert_eq!(result, Err(Ok(NftError::InvalidMetadataUri)));
+
+    // The rejection is side-effect free: the one-time approval is not consumed,
+    // so the admin can retry with an accepted URI.
+    assert!(client.is_remint_approved(&user));
+    assert!(client.get_metadata(&user).is_none());
+
+    client.admin_remint(
+        &user,
+        &500,
+        &create_test_hash(&env, 8),
+        &create_test_uri(&env),
+        &create_test_commitment(&env, 8),
+    );
+    assert_eq!(client.get_metadata_uri(&user), Some(create_test_uri(&env)));
+}
+
+#[test]
+fn test_update_metadata_uri_enforces_metadata_uri_prefix() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let admin = Address::generate(&env);
+    let user = Address::generate(&env);
+
+    let contract_id = env.register(RemittanceNFT, ());
+    let client = RemittanceNFTClient::new(&env, &contract_id);
+
+    client.initialize(&admin);
+    client.mint(
+        &user,
+        &500,
+        &create_test_hash(&env, 9),
+        &create_test_uri(&env),
+        &create_test_commitment(&env, 9),
+        &None,
+    );
+
+    let original = client.get_metadata_uri(&user).unwrap();
+
+    let result = client.try_update_metadata_uri(&user, &String::from_str(&env, "aaaaaaaa"), &None);
+    assert_eq!(result, Err(Ok(NftError::InvalidMetadataUri)));
+
+    // A rejected update must leave the stored URI exactly as it was.
+    assert_eq!(client.get_metadata_uri(&user), Some(original));
+
+    let replacement = String::from_str(&env, "https://example.com/metadata/2.json");
+    client.update_metadata_uri(&user, &replacement, &None);
+    assert_eq!(client.get_metadata_uri(&user), Some(replacement));
 }
